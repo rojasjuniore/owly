@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Integer, Boolean, Numeric, Enum
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 import uuid
 import enum
@@ -44,6 +45,7 @@ class Chunk(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    document = relationship("Document", backref="chunks")
     content = Column(Text, nullable=False)
     section_path = Column(Text)
     chunk_index = Column(Integer)
