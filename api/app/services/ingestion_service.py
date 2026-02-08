@@ -4,6 +4,7 @@ import fitz  # PyMuPDF
 import io
 import re
 import json
+from openai import AsyncOpenAI
 
 from app.models.document import Document, Chunk, Rule, DocumentStatus
 from app.services.retrieval_service import RetrievalService
@@ -235,38 +236,74 @@ class IngestionService:
     
     async def detect_lender_from_content(self, content: bytes, filename: str) -> dict:
         """
-        Detect lender name primarily from filename, with content as fallback.
+        Use LLM to infer lender and program from filename.
         Returns: {"lender": str, "program": str | None, "confidence": str}
         """
-        # First try: Extract from filename (most reliable)
-        lender, program = self._extract_lender_from_filename(filename)
-        
-        if lender:
+        try:
+            client = AsyncOpenAI(api_key=settings.openai_api_key)
+            
+            known_lenders_str = ", ".join(KNOWN_LENDERS)
+            
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"""You extract mortgage lender and program names from PDF filenames.
+
+Known lenders: {known_lenders_str}
+
+Rules:
+1. Match to a known lender when possible (use exact spelling from list)
+2. If the lender isn't in the list but you can identify it, use that name
+3. Extract the program name if mentioned (e.g., "Bank Statement", "DSCR", "Non-QM")
+4. Common filename patterns:
+   - "LenderName_ProgramName_Matrix.pdf"
+   - "LenderName - Program Guidelines.pdf"
+   - "LenderName_Eligibility.pdf"
+
+Return JSON only: {{"lender": "Lender Name", "program": "Program Name or null"}}
+If you cannot identify the lender, return: {{"lender": null, "program": null}}"""
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Filename: {filename}"
+                    }
+                ],
+                temperature=0,
+                max_tokens=100
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
+            if result_text.startswith("```"):
+                result_text = result_text.split("```")[1]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:]
+            
+            result = json.loads(result_text)
+            
+            lender = result.get("lender")
+            program = result.get("program")
+            
+            confidence = "high" if lender else "low"
+            
             return {
                 "lender": lender,
                 "program": program,
-                "confidence": "high"
+                "confidence": confidence
             }
-        
-        # Second try: Search in PDF content for known lenders
-        try:
-            text, _ = self._extract_pdf_content(content)
-            lender, program = self._find_lender_in_text(text[:5000])
             
-            if lender:
-                return {
-                    "lender": lender,
-                    "program": program,
-                    "confidence": "medium"
-                }
         except Exception as e:
-            print(f"Error extracting PDF content: {e}")
-        
-        return {
-            "lender": None,
-            "program": None,
-            "confidence": "low"
-        }
+            print(f"Error detecting lender with LLM: {e}")
+            # Fallback to pattern matching
+            lender, program = self._extract_lender_from_filename(filename)
+            return {
+                "lender": lender,
+                "program": program,
+                "confidence": "medium" if lender else "low"
+            }
     
     def _extract_lender_from_filename(self, filename: str) -> tuple[str | None, str | None]:
         """
