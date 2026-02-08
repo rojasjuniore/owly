@@ -10,25 +10,52 @@ class LLMService:
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model = settings.openai_model
     
-    async def extract_facts(self, message: str, current_facts: dict) -> dict:
+    async def extract_facts(
+        self, 
+        message: str, 
+        current_facts: dict,
+        last_question_field: str | None = None
+    ) -> dict:
         """
         Extract scenario facts from user message.
         Returns dict of extracted fields.
         """
+        # Build context about what field we're asking for
+        field_context = ""
+        if last_question_field:
+            field_context = f"""
+IMPORTANT: The user was just asked about "{last_question_field}".
+If the user's message is a short answer (like "Single family", "California", "Purchase", etc.), 
+map it to the appropriate "{last_question_field}" field value.
+"""
+
         system_prompt = """You are an assistant that extracts mortgage loan scenario information from user messages.
 
 Extract the following fields if mentioned:
-- state: The US state where the property is located
+- state: The US state where the property is located (e.g., "California" → "california", "CA" → "california")
 - loan_purpose: purchase, rate_term_refi, or cashout
-- occupancy: primary, second_home, or investment
-- property_type: sfr, condo, 2-4_unit, or other
-- loan_amount: The loan amount (number)
-- ltv: Loan-to-value percentage (number)
-- fico: Credit score (number)
-- doc_type: full_doc, bank_statement, dscr, 1099, wvoe, asset_utilization, or other
-- credit_events: none, bankruptcy, foreclosure, short_sale, or late_payments
-
+- occupancy: primary, second_home, or investment  
+- property_type: sfr (Single Family, SFR, House), condo (Condo, Condominium), 2-4_unit (Duplex, Triplex, Fourplex), or other
+- loan_amount: The loan amount (number only, no $ or commas)
+- ltv: Loan-to-value percentage (number only, no %)
+- fico: Credit score (number, e.g., 740)
+- doc_type: full_doc (W-2, Full Doc), bank_statement (Bank Statement), dscr (DSCR, rental income), 1099, wvoe, asset_utilization, or other
+- credit_events: none (No, None, Clean), bankruptcy, foreclosure, short_sale, or late_payments
+{field_context}
 Current known facts: {current_facts}
+
+MAPPING GUIDE for short answers:
+- "Single family", "SFR", "House", "Single-family home" → property_type: "sfr"
+- "Condo", "Condominium" → property_type: "condo"  
+- "Duplex", "2-unit", "Triplex", "3-unit", "Fourplex", "4-unit" → property_type: "2-4_unit"
+- "Primary", "Primary residence", "Owner occupied" → occupancy: "primary"
+- "Investment", "Rental", "NOO" → occupancy: "investment"
+- "Purchase", "Buying" → loan_purpose: "purchase"
+- "Refi", "Refinance", "Rate and term" → loan_purpose: "rate_term_refi"
+- "Cash out", "Cash-out refi" → loan_purpose: "cashout"
+- "W-2", "Full doc", "Tax returns" → doc_type: "full_doc"
+- "Bank statements", "Self-employed" → doc_type: "bank_statement"
+- "None", "No", "Clean credit" → credit_events: "none"
 
 Respond with a JSON object containing ONLY the newly extracted fields.
 If no new information is found, respond with an empty object {{}}.
@@ -37,7 +64,10 @@ Use lowercase values and underscores for multi-word values."""
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": system_prompt.format(current_facts=json.dumps(current_facts))},
+                {"role": "system", "content": system_prompt.format(
+                    current_facts=json.dumps(current_facts),
+                    field_context=field_context
+                )},
                 {"role": "user", "content": message}
             ],
             response_format={"type": "json_object"},

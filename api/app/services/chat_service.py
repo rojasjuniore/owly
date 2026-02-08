@@ -87,7 +87,18 @@ class ChatService:
         
         # 3. Extract facts from message
         current_facts = conversation.facts or {}
-        extracted = await self.llm.extract_facts(message, current_facts)
+        
+        # Get the last question field from previous missing_fields
+        # This tells the LLM what field we were asking about
+        last_question_field = None
+        if conversation.missing_fields and len(conversation.missing_fields) > 0:
+            last_question_field = conversation.missing_fields[0]
+        
+        extracted = await self.llm.extract_facts(
+            message, 
+            current_facts,
+            last_question_field=last_question_field
+        )
         updated_facts = {**current_facts, **extracted}
         conversation.facts = updated_facts
         
