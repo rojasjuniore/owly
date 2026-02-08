@@ -20,15 +20,21 @@ Consider:
 Be INCLUSIVE - include lenders that MIGHT work, even if uncertain.
 Better to include and filter later than miss a good option.
 
+IMPORTANT: For each candidate, cite the source of information using [source_id].
+
 You have access to information about these lenders:
 {available_lenders}
 
 Respond in JSON format:
-{
+{{
   "understanding": "Brief summary of what the client is looking for",
-  "top_candidates": ["Lender A", "Lender B", "Lender C"],
-  "reasoning": "Why these lenders were selected over others"
-}"""
+  "top_candidates": [
+    {{"lender": "Lender A", "reason": "Reason with [1] citation"}},
+    {{"lender": "Lender B", "reason": "Reason with [2] citation"}},
+    {{"lender": "Lender C", "reason": "Reason with [3] citation"}}
+  ],
+  "reasoning": "Overall rationale for selections"
+}}"""
 
 
 class LeaderAgent(BaseAgent):
@@ -49,50 +55,86 @@ class LeaderAgent(BaseAgent):
     
     async def analyze(self, scenario: dict, context: dict | None = None) -> dict:
         """
-        Analyze scenario and return top candidate lenders.
+        Analyze scenario and return top candidate lenders with citations.
         """
         # Get some context from RAG to help decision
         query = self._build_query(scenario)
         chunks = await self.retrieval.search(query, top_k=10)
         
-        # Build context about what lenders appear in results
+        # Build context about what lenders appear in results - with source IDs for citations
         lender_mentions = {}
-        for chunk in chunks:
+        sources = []
+        
+        for i, chunk in enumerate(chunks):
             lender = chunk.get("lender", "Unknown")
+            source_id = i + 1
+            
+            # Track source for citations
+            sources.append({
+                "id": source_id,
+                "lender": lender,
+                "filename": chunk.get("filename", "Unknown"),
+                "content_preview": chunk["content"][:100]
+            })
+            
             if lender not in lender_mentions:
                 lender_mentions[lender] = []
-            lender_mentions[lender].append(chunk["content"][:200])
+            lender_mentions[lender].append({
+                "source_id": source_id,
+                "content": chunk["content"][:200]
+            })
         
-        # Build user prompt
+        # Build user prompt with source IDs
         user_prompt = f"""Scenario:
 {self._format_scenario(scenario)}
 
-Relevant information found:
-{self._format_lender_mentions(lender_mentions)}
+Relevant information found (use [source_id] to cite):
+{self._format_lender_mentions_with_ids(lender_mentions)}
 
 Which lenders should we analyze in detail for this scenario?
-Return the top 3-5 most promising candidates."""
+Return the top 3-5 most promising candidates with citations."""
 
         result = await self._call_llm(user_prompt)
         
+        # Add sources to result
+        result["sources"] = sources
+        
         # Validate response
         if "error" in result:
-            # Fallback: return all available lenders
             return {
                 "understanding": "Could not analyze - using all lenders",
-                "top_candidates": self.available_lenders[:5],
+                "top_candidates": [{"lender": l, "reason": "Included for analysis"} for l in self.available_lenders[:5]],
                 "reasoning": "Fallback due to error",
+                "sources": sources,
                 "error": result["error"]
             }
         
         # Ensure top_candidates only includes available lenders
         if "top_candidates" in result:
-            result["top_candidates"] = [
-                l for l in result["top_candidates"]
-                if l in self.available_lenders
-            ][:5]
+            valid_candidates = []
+            for candidate in result["top_candidates"]:
+                lender_name = candidate.get("lender") if isinstance(candidate, dict) else candidate
+                if lender_name in self.available_lenders:
+                    if isinstance(candidate, dict):
+                        valid_candidates.append(candidate)
+                    else:
+                        valid_candidates.append({"lender": candidate, "reason": ""})
+            result["top_candidates"] = valid_candidates[:5]
         
         return result
+    
+    def _format_lender_mentions_with_ids(self, mentions: dict) -> str:
+        """Format lender mentions with source IDs for citations."""
+        if not mentions:
+            return "No specific lender information found in documents."
+        
+        lines = []
+        for lender, items in mentions.items():
+            lines.append(f"\n{lender}:")
+            for item in items[:2]:
+                lines.append(f"  - [{item['source_id']}] {item['content']}...")
+        
+        return "\n".join(lines)
     
     def _build_query(self, scenario: dict) -> str:
         """Build search query from scenario."""
@@ -110,15 +152,4 @@ Return the top 3-5 most promising candidates."""
         
         return " ".join(parts) + " eligibility requirements matrix"
     
-    def _format_lender_mentions(self, mentions: dict) -> str:
-        """Format lender mentions for prompt."""
-        if not mentions:
-            return "No specific lender information found in documents."
-        
-        lines = []
-        for lender, snippets in mentions.items():
-            lines.append(f"\n{lender}:")
-            for snippet in snippets[:2]:
-                lines.append(f"  - {snippet}...")
-        
-        return "\n".join(lines)
+    # _format_lender_mentions_with_ids is used instead

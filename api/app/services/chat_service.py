@@ -1,57 +1,63 @@
+"""
+Chat Service - Orchestrates the conversation flow
+
+NEW FLEXIBLE FLOW:
+1. Classify user intent (general question, product search, eligibility, scenario input)
+2. Route to appropriate handler
+3. Always try to be helpful, even with incomplete data
+4. Always cite sources
+"""
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from uuid import UUID
 
 from app.models.conversation import Conversation, Message, MessageRole
+from app.services.intent_classifier import IntentClassifier, IntentType
+from app.services.general_qa_service import GeneralQAService
 from app.services.agent_factory import AgentFactory
 from app.services.llm_service import LLMService
 
 
-REQUIRED_FIELDS = [
-    "state",
-    "loan_purpose",
-    "occupancy",
-    "property_type",
-    "loan_amount",
-    "ltv",
-    "fico",
-    "doc_type",
-    "credit_events",
+# Minimum fields for a preliminary recommendation
+MINIMUM_FIELDS = ["fico"]  # We can give suggestions with just credit score
+
+# All fields for complete analysis
+ALL_FIELDS = [
+    "state", "loan_purpose", "occupancy", "property_type",
+    "loan_amount", "ltv", "fico", "doc_type", "credit_events"
 ]
 
-FIELD_QUESTIONS = {
-    "state": "What state is the property located in?",
-    "loan_purpose": "What is the loan purpose? (Purchase, Rate/Term Refinance, or Cash-Out)",
-    "occupancy": "What is the occupancy type? (Primary Residence, Second Home, or Investment)",
-    "property_type": "What is the property type? (Single Family, Condo, 2-4 Unit, etc.)",
-    "loan_amount": "What is the target loan amount?",
-    "ltv": "What is the estimated LTV (Loan-to-Value) percentage?",
-    "fico": "What is the borrower's FICO score or range?",
-    "doc_type": "What income documentation type? (Full Doc, Bank Statement, DSCR, etc.)",
-    "credit_events": "Are there any recent credit events? (Bankruptcy, Foreclosure, Short Sale, or None)",
+FIELD_DESCRIPTIONS = {
+    "state": "property state",
+    "loan_purpose": "loan purpose (purchase/refi/cash-out)",
+    "occupancy": "occupancy type (primary/investment/second home)",
+    "property_type": "property type (SFR/condo/multi-unit)",
+    "loan_amount": "loan amount",
+    "ltv": "LTV percentage",
+    "fico": "credit score",
+    "doc_type": "income documentation type",
+    "credit_events": "recent credit events"
 }
 
-# Timeout for each specialist agent
-SPECIALIST_TIMEOUT = 15  # seconds
+SPECIALIST_TIMEOUT = 15
 
 
 class ChatService:
     """
-    Multi-Agent Chat Service
+    Flexible Multi-Agent Chat Service
     
-    Flow:
-    1. Extract facts from user message
-    2. Check if we have minimum required fields
-    3. If incomplete: ask follow-up
-    4. If complete: run multi-agent eligibility analysis
-       a. Leader Agent: pre-filter lenders (top 3-5)
-       b. Specialist Agents: analyze each lender in parallel
-       c. Evaluator Agent: compare and recommend
+    Handles:
+    - General questions about lenders/products
+    - Product searches ("best lender for bank statement")
+    - Quick eligibility checks ("does any lender do X")
+    - Full scenario analysis (with preliminary suggestions when incomplete)
     """
     
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.intent_classifier = IntentClassifier()
+        self.general_qa = GeneralQAService(db)
         self.agent_factory = AgentFactory(db)
         self.llm = LLMService()
     
@@ -60,21 +66,10 @@ class ChatService:
         message: str,
         conversation_id: UUID | None = None
     ) -> dict:
-        """Process user message and return response."""
+        """Process user message with flexible routing."""
         
         # 1. Get or create conversation
-        if conversation_id:
-            result = await self.db.execute(
-                select(Conversation).where(Conversation.id == conversation_id)
-            )
-            conversation = result.scalar_one_or_none()
-            if not conversation:
-                conversation = Conversation()
-                self.db.add(conversation)
-        else:
-            conversation = Conversation()
-            self.db.add(conversation)
-        
+        conversation = await self._get_or_create_conversation(conversation_id)
         await self.db.flush()
         
         # 2. Save user message
@@ -85,50 +80,74 @@ class ChatService:
         )
         self.db.add(user_msg)
         
-        # 3. Extract facts from message
+        # 3. Get current state
         current_facts = conversation.facts or {}
-        
-        # Get the last question field from previous missing_fields
-        # This tells the LLM what field we were asking about
         last_question_field = None
         if conversation.missing_fields and len(conversation.missing_fields) > 0:
             last_question_field = conversation.missing_fields[0]
         
-        extracted = await self.llm.extract_facts(
-            message, 
-            current_facts,
-            last_question_field=last_question_field
+        # 4. Classify intent
+        last_assistant_msg = await self._get_last_assistant_message(conversation.id)
+        intent_result = await self.intent_classifier.classify(
+            message,
+            last_question=last_assistant_msg,
+            current_facts=current_facts
         )
-        updated_facts = {**current_facts, **extracted}
-        conversation.facts = updated_facts
         
-        # 4. Check missing fields
+        intent = intent_result.get("intent", IntentType.SCENARIO_INPUT)
+        entities = intent_result.get("extracted_entities", {})
+        
+        # 5. Route based on intent
+        if intent == IntentType.GENERAL_QUESTION:
+            result = await self.general_qa.answer_general_question(message)
+            response = result["response"]
+            citations = result.get("citations", [])
+            # Don't update facts for general questions
+            updated_facts = current_facts
+            
+        elif intent == IntentType.PRODUCT_SEARCH:
+            product_type = entities.get("product_type_asked") or entities.get("doc_type")
+            result = await self.general_qa.answer_product_search(message, product_type)
+            response = result["response"]
+            citations = result.get("citations", [])
+            updated_facts = current_facts
+            
+        elif intent == IntentType.ELIGIBILITY_CHECK:
+            result = await self.general_qa.answer_eligibility_check(message, entities)
+            response = result["response"]
+            citations = result.get("citations", [])
+            # Merge any extracted entities
+            updated_facts = {**current_facts, **self._clean_entities(entities)}
+            
+        else:
+            # SCENARIO_INPUT or FOLLOW_UP - Extract facts and give recommendations
+            extracted = await self.llm.extract_facts(
+                message, 
+                current_facts,
+                last_question_field=last_question_field
+            )
+            # Also merge entities from intent classification
+            updated_facts = {**current_facts, **extracted, **self._clean_entities(entities)}
+            
+            # Generate response based on completeness
+            result = await self._generate_scenario_response(updated_facts)
+            response = result["response"]
+            citations = result.get("citations", [])
+        
+        # 6. Update conversation
+        conversation.facts = updated_facts
         missing = self._get_missing_fields(updated_facts)
         conversation.missing_fields = missing
         
-        # 5. Generate response
-        if missing:
-            # Ask for most important missing field
-            priority_field = missing[0]
-            response = FIELD_QUESTIONS.get(
-                priority_field,
-                f"Could you please provide the {priority_field.replace('_', ' ')}?"
-            )
-            confidence = self._calculate_field_confidence(updated_facts, missing)
-            citations = None
-        else:
-            # Run multi-agent eligibility analysis
-            eligibility_result = await self._run_multi_agent_analysis(updated_facts)
-            response = eligibility_result["response"]
-            confidence = eligibility_result.get("confidence", 85)
-            citations = eligibility_result.get("citations")
+        # 7. Calculate confidence
+        confidence = self._calculate_confidence(updated_facts, missing)
         
-        # Save assistant message
+        # 8. Save assistant message
         assistant_msg = Message(
             conversation_id=conversation.id,
             role=MessageRole.ASSISTANT,
             content=response,
-            metadata={"citations": citations} if citations else {}
+            extra_data={"citations": citations, "intent": intent}
         )
         self.db.add(assistant_msg)
         
@@ -143,22 +162,157 @@ class ChatService:
             "citations": citations
         }
     
-    def _get_missing_fields(self, facts: dict) -> list[str]:
-        """Return list of required fields that are missing."""
-        return [f for f in REQUIRED_FIELDS if f not in facts or facts[f] is None]
+    async def _get_or_create_conversation(self, conversation_id: UUID | None) -> Conversation:
+        """Get existing conversation or create new one."""
+        if conversation_id:
+            result = await self.db.execute(
+                select(Conversation).where(Conversation.id == conversation_id)
+            )
+            conversation = result.scalar_one_or_none()
+            if conversation:
+                return conversation
+        
+        conversation = Conversation()
+        self.db.add(conversation)
+        return conversation
     
-    def _calculate_field_confidence(self, facts: dict, missing: list[str]) -> int:
-        """Calculate confidence based on field completeness."""
-        total = len(REQUIRED_FIELDS)
+    async def _get_last_assistant_message(self, conversation_id: UUID) -> str | None:
+        """Get the last assistant message for context."""
+        result = await self.db.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .where(Message.role == MessageRole.ASSISTANT)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+        msg = result.scalar_one_or_none()
+        return msg.content if msg else None
+    
+    def _clean_entities(self, entities: dict) -> dict:
+        """Remove None values from entities."""
+        return {k: v for k, v in entities.items() if v is not None}
+    
+    def _get_missing_fields(self, facts: dict) -> list[str]:
+        """Return list of fields that are missing."""
+        return [f for f in ALL_FIELDS if f not in facts or facts[f] is None]
+    
+    def _calculate_confidence(self, facts: dict, missing: list[str]) -> int:
+        """Calculate confidence score based on available data."""
+        total = len(ALL_FIELDS)
         present = total - len(missing)
-        return int((present / total) * 40)  # Max 40 points for fields
+        
+        # Base score from field completeness (0-60)
+        field_score = int((present / total) * 60)
+        
+        # Bonus for critical fields (0-40)
+        critical_bonus = 0
+        if facts.get("fico"):
+            critical_bonus += 15
+        if facts.get("ltv"):
+            critical_bonus += 10
+        if facts.get("state"):
+            critical_bonus += 5
+        if facts.get("loan_purpose"):
+            critical_bonus += 5
+        if facts.get("doc_type"):
+            critical_bonus += 5
+        
+        return min(95, field_score + critical_bonus)
+    
+    async def _generate_scenario_response(self, facts: dict) -> dict:
+        """
+        Generate response based on scenario completeness.
+        
+        - If minimal data: Give preliminary suggestions + ask what's missing
+        - If good data: Run multi-agent analysis
+        - Always cite sources
+        """
+        missing = self._get_missing_fields(facts)
+        confidence = self._calculate_confidence(facts, missing)
+        
+        # Check if we have minimum data for a preliminary response
+        has_minimum = bool(facts.get("fico") or facts.get("doc_type") or facts.get("loan_purpose"))
+        
+        if not has_minimum:
+            # Not enough data - ask for basics
+            return {
+                "response": self._format_initial_prompt(),
+                "citations": []
+            }
+        
+        if confidence >= 70:
+            # Enough data for full analysis
+            return await self._run_multi_agent_analysis(facts)
+        else:
+            # Give preliminary suggestions + mention what's missing
+            return await self._generate_preliminary_response(facts, missing)
+    
+    def _format_initial_prompt(self) -> str:
+        """Format initial prompt when we have no data."""
+        return """👋 I'm Owly, your mortgage eligibility assistant!
+
+I can help you find the right lender programs. Here's what I can do:
+
+**Ask me anything:**
+- "Which lenders offer bank statement loans?"
+- "Does any DSCR lender accept 5 units?"
+- "What's the minimum score for FHA?"
+
+**Or describe your scenario:**
+Tell me about your client's situation - credit score, property type, loan purpose, etc. I'll suggest matching programs even with partial information!
+
+What would you like to know?"""
+    
+    async def _generate_preliminary_response(self, facts: dict, missing: list[str]) -> dict:
+        """Generate preliminary suggestions with incomplete data."""
+        
+        # Run a simplified analysis
+        try:
+            leader = await self.agent_factory.create_leader_agent()
+            leader_result = await leader.analyze(facts)
+            
+            top_lenders = leader_result.get("top_candidates", [])
+            understanding = leader_result.get("understanding", "")
+            
+            # Format response
+            response_parts = ["## Preliminary Analysis\n"]
+            
+            if understanding:
+                response_parts.append(f"**Understanding:** {understanding}\n")
+            
+            if top_lenders:
+                response_parts.append("\n**Potential Matches:**")
+                for lender in top_lenders[:3]:
+                    if isinstance(lender, dict):
+                        response_parts.append(f"- **{lender.get('lender', 'Unknown')}** - {lender.get('reason', '')}")
+                    else:
+                        response_parts.append(f"- {lender}")
+            else:
+                response_parts.append("\n*I need a bit more information to identify specific lenders.*")
+            
+            # Add what's missing
+            if missing:
+                response_parts.append("\n\n**To improve this recommendation, please provide:**")
+                top_missing = missing[:3]
+                for field in top_missing:
+                    desc = FIELD_DESCRIPTIONS.get(field, field.replace("_", " "))
+                    response_parts.append(f"- {desc}")
+            
+            return {
+                "response": "\n".join(response_parts),
+                "citations": leader_result.get("sources", [])
+            }
+            
+        except Exception as e:
+            return {
+                "response": f"I'm analyzing your scenario. To give better recommendations, could you tell me:\n"
+                          f"- {FIELD_DESCRIPTIONS.get(missing[0], 'more details')}" if missing else "",
+                "citations": []
+            }
     
     async def _run_multi_agent_analysis(self, scenario: dict) -> dict:
         """
-        Run the multi-agent eligibility analysis:
-        1. Leader: identify top 3-5 lenders
-        2. Specialists: analyze each in parallel
-        3. Evaluator: compare and recommend
+        Run the full multi-agent eligibility analysis with citations.
         """
         try:
             # 1. Leader Agent - Pre-filter lenders
@@ -166,12 +320,21 @@ class ChatService:
             leader_result = await leader.analyze(scenario)
             
             top_lenders = leader_result.get("top_candidates", [])
+            all_citations = leader_result.get("sources", [])
             
             if not top_lenders:
+                missing = self._get_missing_fields(scenario)
+                missing_text = ""
+                if missing:
+                    missing_text = "\n\n**To find more options, provide:**\n"
+                    for f in missing[:3]:
+                        missing_text += f"- {FIELD_DESCRIPTIONS.get(f, f)}\n"
+                
                 return {
-                    "response": self._format_no_lenders_response(leader_result),
-                    "confidence": 50,
-                    "citations": []
+                    "response": f"Based on the criteria provided, I couldn't identify strongly matching lenders.\n\n"
+                              f"**Scenario Summary:**\n{self._format_facts(scenario)}"
+                              f"{missing_text}",
+                    "citations": all_citations
                 }
             
             # 2. Specialist Agents - Analyze in parallel
@@ -182,22 +345,20 @@ class ChatService:
                 for agent in specialists.values()
             ]
             
-            specialist_results = await asyncio.gather(
-                *specialist_tasks,
-                return_exceptions=True
-            )
+            specialist_results = await asyncio.gather(*specialist_tasks, return_exceptions=True)
             
-            # Filter successful results
-            valid_results = [
-                r for r in specialist_results
-                if isinstance(r, dict) and "error" not in r
-            ]
+            # Collect valid results and citations
+            valid_results = []
+            for r in specialist_results:
+                if isinstance(r, dict) and "error" not in r:
+                    valid_results.append(r)
+                    if r.get("sources"):
+                        all_citations.extend(r["sources"])
             
             if not valid_results:
                 return {
-                    "response": self._format_analysis_error_response(specialist_results),
-                    "confidence": 40,
-                    "citations": []
+                    "response": "I encountered issues analyzing the lenders. Please try again.",
+                    "citations": all_citations
                 }
             
             # 3. Evaluator Agent - Compare and recommend
@@ -207,19 +368,21 @@ class ChatService:
                 context={"specialist_analyses": valid_results}
             )
             
-            # Format final response
+            if evaluator_result.get("sources"):
+                all_citations.extend(evaluator_result["sources"])
+            
+            # Format final response with citations
+            response = self._format_final_response(evaluator_result, valid_results, scenario)
+            
             return {
-                "response": self._format_final_response(evaluator_result, valid_results),
-                "confidence": self._calculate_analysis_confidence(valid_results),
-                "citations": evaluator_result.get("sources", [])
+                "response": response,
+                "citations": all_citations
             }
             
         except Exception as e:
             return {
                 "response": f"I encountered an error during analysis: {str(e)}. Please try again.",
-                "confidence": 0,
-                "citations": [],
-                "error": str(e)
+                "citations": []
             }
     
     async def _run_specialist_with_timeout(self, agent, scenario: dict) -> dict:
@@ -230,77 +393,52 @@ class ChatService:
                 timeout=SPECIALIST_TIMEOUT
             )
         except asyncio.TimeoutError:
-            return {"error": f"Timeout analyzing {agent.lender_name}"}
+            return {"error": f"Timeout analyzing {getattr(agent, 'lender_name', 'lender')}"}
         except Exception as e:
             return {"error": str(e)}
     
-    def _format_no_lenders_response(self, leader_result: dict) -> str:
-        """Format response when no lenders are found."""
-        return f"""Based on my analysis, I couldn't identify suitable lenders for this scenario.
-
-**Understanding:** {leader_result.get('understanding', 'N/A')}
-
-This could mean:
-- The scenario has requirements not covered by our current lender guidelines
-- Some parameters may need adjustment (FICO, LTV, etc.)
-- The documentation type may limit available options
-
-Would you like to:
-1. Adjust any scenario parameters?
-2. Explore different documentation options?
-3. Get more details on what might be limiting eligibility?"""
+    def _format_facts(self, facts: dict) -> str:
+        """Format facts as readable summary."""
+        lines = []
+        for key, value in facts.items():
+            if value is not None:
+                label = FIELD_DESCRIPTIONS.get(key, key.replace("_", " ")).title()
+                lines.append(f"- {label}: {value}")
+        return "\n".join(lines) if lines else "No details provided yet."
     
-    def _format_analysis_error_response(self, results: list) -> str:
-        """Format response when analysis fails."""
-        errors = [r.get("error", "Unknown error") for r in results if isinstance(r, dict)]
-        return f"""I encountered issues analyzing the lenders. Please try again.
-
-Technical details: {', '.join(errors[:3])}"""
-    
-    def _format_final_response(self, evaluator_result: dict, specialist_results: list) -> str:
-        """Format the final recommendation response."""
+    def _format_final_response(self, evaluator_result: dict, specialist_results: list, scenario: dict) -> str:
+        """Format the final recommendation with citations."""
         analysis = evaluator_result.get("analysis", "")
         
         if analysis:
-            return analysis
+            # Add scenario summary at the end
+            response = analysis
+            response += f"\n\n---\n**Your Scenario:**\n{self._format_facts(scenario)}"
+            return response
         
-        # Fallback formatting if analysis is empty
+        # Fallback formatting
+        response_parts = []
         recommendation = evaluator_result.get("recommendation")
         alternatives = evaluator_result.get("alternatives", [])
         
-        response_parts = []
-        
         if recommendation:
-            response_parts.append(f"## Recommendation\n\n**{recommendation['lender']} - {recommendation['program']}**\n")
+            response_parts.append(f"## ✅ Recommended\n\n**{recommendation.get('lender', 'Unknown')}** - {recommendation.get('program', 'Standard')}")
+            if recommendation.get("reason"):
+                response_parts.append(f"\n{recommendation['reason']}")
         
         if alternatives:
-            response_parts.append("\n### Alternatives\n")
+            response_parts.append("\n\n### Alternatives")
             for alt in alternatives[:2]:
-                response_parts.append(f"- {alt['lender']} - {alt['program']}")
+                response_parts.append(f"\n- **{alt.get('lender', '')}**: {alt.get('program', '')} - {alt.get('reason', '')}")
         
         if not response_parts:
-            # Last resort: list all eligible products
+            # List eligible products from specialists
             response_parts.append("## Eligible Options\n")
             for result in specialist_results:
                 lender = result.get("lender", "Unknown")
                 for prod in result.get("eligible_products", []):
                     response_parts.append(f"- **{lender}**: {prod.get('program', 'Standard')}")
         
-        return "\n".join(response_parts) if response_parts else "No eligible products found."
-    
-    def _calculate_analysis_confidence(self, results: list) -> int:
-        """Calculate confidence based on analysis results."""
-        if not results:
-            return 40
+        response_parts.append(f"\n\n---\n**Your Scenario:**\n{self._format_facts(scenario)}")
         
-        # Base score
-        score = 50
-        
-        # Add points for each lender with eligible products
-        for result in results:
-            eligible = result.get("eligible_products", [])
-            if eligible:
-                score += 10
-        
-        # Cap at 95
-        return min(95, score)
+        return "\n".join(response_parts)
