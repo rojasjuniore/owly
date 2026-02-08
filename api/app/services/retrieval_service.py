@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 
 from app.models.document import Chunk, Document, DocumentStatus
 from app.config import settings
+from app.db import async_session
 
 
 class RetrievalService:
@@ -15,46 +16,54 @@ class RetrievalService:
         """
         Search for relevant chunks using vector similarity.
         Returns list of chunks with scores.
+        Uses a separate session to avoid transaction conflicts.
         """
-        # Generate embedding for query
-        embedding = await self._embed(query)
-        
-        # Vector similarity search
-        # Using pgvector's cosine distance
-        sql = text("""
-            SELECT 
-                c.id,
-                c.content,
-                c.section_path,
-                c.document_id,
-                d.filename,
-                d.lender,
-                1 - (c.embedding <=> :embedding::vector) as similarity
-            FROM chunks c
-            JOIN documents d ON c.document_id = d.id
-            WHERE d.status = 'active'
-            ORDER BY c.embedding <=> :embedding::vector
-            LIMIT :limit
-        """)
-        
-        result = await self.db.execute(
-            sql,
-            {"embedding": str(embedding), "limit": top_k}
-        )
-        rows = result.fetchall()
-        
-        return [
-            {
-                "id": str(row.id),
-                "content": row.content,
-                "section_path": row.section_path,
-                "document_id": str(row.document_id),
-                "filename": row.filename,
-                "lender": row.lender,
-                "similarity": float(row.similarity)
-            }
-            for row in rows
-        ]
+        try:
+            # Generate embedding for query
+            embedding = await self._embed(query)
+            
+            # Use separate session for vector search to avoid transaction conflicts
+            async with async_session() as session:
+                # Vector similarity search
+                # Using pgvector's cosine distance
+                sql = text("""
+                    SELECT 
+                        c.id,
+                        c.content,
+                        c.section_path,
+                        c.document_id,
+                        d.filename,
+                        d.lender,
+                        1 - (c.embedding <=> :embedding::vector) as similarity
+                    FROM chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE d.status = 'active'
+                    ORDER BY c.embedding <=> :embedding::vector
+                    LIMIT :limit
+                """)
+                
+                result = await session.execute(
+                    sql,
+                    {"embedding": str(embedding), "limit": top_k}
+                )
+                rows = result.fetchall()
+                
+                return [
+                    {
+                        "id": str(row.id),
+                        "content": row.content,
+                        "section_path": row.section_path,
+                        "document_id": str(row.document_id),
+                        "filename": row.filename,
+                        "lender": row.lender,
+                        "similarity": float(row.similarity)
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            print(f"RetrievalService.search error: {e}")
+            # Return empty list on error to avoid breaking the flow
+            return []
     
     async def _embed(self, text: str) -> list[float]:
         """Generate embedding for text using OpenAI."""

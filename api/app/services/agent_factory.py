@@ -5,6 +5,7 @@ from app.models.document import Document, DocumentStatus
 from app.services.leader_agent import LeaderAgent
 from app.services.specialist_agent import SpecialistAgent
 from app.services.evaluator_agent import EvaluatorAgent
+from app.db import async_session
 
 
 class AgentFactory:
@@ -20,12 +21,18 @@ class AgentFactory:
     async def get_available_lenders(self) -> list[str]:
         """Get list of lenders with active documents."""
         if self._available_lenders is None:
-            result = await self.db.execute(
-                select(distinct(Document.lender))
-                .where(Document.status == DocumentStatus.ACTIVE)
-                .where(Document.lender.isnot(None))
-            )
-            self._available_lenders = [row[0] for row in result.fetchall()]
+            try:
+                # Use separate session to avoid transaction conflicts
+                async with async_session() as session:
+                    result = await session.execute(
+                        select(distinct(Document.lender))
+                        .where(Document.status == DocumentStatus.ACTIVE)
+                        .where(Document.lender.isnot(None))
+                    )
+                    self._available_lenders = [row[0] for row in result.fetchall()]
+            except Exception as e:
+                print(f"AgentFactory.get_available_lenders error: {e}")
+                self._available_lenders = []
         
         return self._available_lenders
     
