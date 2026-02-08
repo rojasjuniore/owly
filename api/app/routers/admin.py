@@ -72,15 +72,42 @@ async def list_documents(db: AsyncSession = Depends(get_db)):
     return response
 
 
+class LenderDetectionResponse(BaseModel):
+    lender: str | None
+    program: str | None
+    confidence: str
+
+
+@router.post("/documents/detect-lender", response_model=LenderDetectionResponse)
+async def detect_lender(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """Detect lender name from PDF content without uploading."""
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    content = await file.read()
+    ingestion_service = IngestionService(db)
+    result = await ingestion_service.detect_lender_from_content(content, file.filename)
+    
+    return LenderDetectionResponse(
+        lender=result.get("lender"),
+        program=result.get("program"),
+        confidence=result.get("confidence", "low")
+    )
+
+
 @router.post("/documents", response_model=DocumentResponse)
 async def upload_document(
     file: UploadFile = File(...),
     lender: str = Form(None),
     program: str = Form(None),
     archetype: str = Form(None),
+    auto_detect: bool = Form(True),  # Auto-detect lender if not provided
     db: AsyncSession = Depends(get_db)
 ):
-    """Upload and process a PDF document."""
+    """Upload and process a PDF document. Auto-detects lender if not provided."""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     
@@ -95,11 +122,26 @@ async def upload_document(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Document already exists")
     
+    # Auto-detect lender if not provided and auto_detect is enabled
+    ingestion_service = IngestionService(db)
+    detected_lender = None
+    detected_program = None
+    
+    if auto_detect and not lender:
+        detection = await ingestion_service.detect_lender_from_content(content, file.filename)
+        detected_lender = detection.get("lender")
+        detected_program = detection.get("program")
+        print(f"Auto-detected lender: {detected_lender} (confidence: {detection.get('confidence')})")
+    
+    # Use provided values or detected values
+    final_lender = lender or detected_lender
+    final_program = program or detected_program
+    
     # Create document record
     doc = Document(
         filename=file.filename,
-        lender=lender,
-        program=program,
+        lender=final_lender,
+        program=final_program,
         archetype=DocumentArchetype(archetype) if archetype else None,
         file_hash=file_hash,
         status=DocumentStatus.ACTIVE
@@ -108,8 +150,18 @@ async def upload_document(
     await db.flush()
     
     # Process document (extract text, chunk, embed)
-    ingestion_service = IngestionService(db)
     await ingestion_service.process_document(doc.id, content)
+    
+    # Get counts after processing
+    chunks_result = await db.execute(
+        select(func.count(Chunk.id)).where(Chunk.document_id == doc.id)
+    )
+    chunks_count = chunks_result.scalar() or 0
+    
+    rules_result = await db.execute(
+        select(func.count(Rule.id)).where(Rule.document_id == doc.id)
+    )
+    rules_count = rules_result.scalar() or 0
     
     return DocumentResponse(
         id=str(doc.id),
@@ -118,8 +170,8 @@ async def upload_document(
         program=doc.program,
         archetype=doc.archetype.value if doc.archetype else None,
         status=doc.status.value,
-        chunks_count=0,  # Will be updated after processing
-        rules_count=0,
+        chunks_count=chunks_count,
+        rules_count=rules_count,
         created_at=doc.created_at.isoformat()
     )
 

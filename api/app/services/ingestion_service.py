@@ -3,9 +3,44 @@ from sqlalchemy import select
 import fitz  # PyMuPDF
 import io
 import re
+import json
+from openai import AsyncOpenAI
 
 from app.models.document import Document, Chunk, Rule, DocumentStatus
 from app.services.retrieval_service import RetrievalService
+from app.config import settings
+
+
+# Known lenders for better matching
+KNOWN_LENDERS = [
+    "Acra Lending",
+    "A&D Mortgage", 
+    "Angel Oak",
+    "Athas Capital",
+    "Caliber Home Loans",
+    "Carrington",
+    "Champions Funding",
+    "Citadel Servicing",
+    "Civic Financial",
+    "CrossCountry Mortgage",
+    "Deephaven",
+    "Finance of America",
+    "First National Bank of America",
+    "Freedom Mortgage",
+    "HomeXpress",
+    "Impac Mortgage",
+    "Kind Lending",
+    "LoanStream",
+    "New American Funding",
+    "Newrez",
+    "PennyMac",
+    "PRMG",
+    "Quontic Bank",
+    "Rocket Mortgage",
+    "Sprout Mortgage",
+    "UWM",
+    "Verus Mortgage",
+]
 
 
 class IngestionService:
@@ -187,7 +222,7 @@ class IngestionService:
         await self.db.flush()
     
     def _extract_lender_name(self, text: str, filename: str) -> str:
-        """Try to extract lender name from document."""
+        """Try to extract lender name from document (sync fallback)."""
         # Try from filename first
         parts = filename.replace(".pdf", "").replace("_", " ").split()
         if parts:
@@ -198,3 +233,76 @@ class IngestionService:
             return parts[0]
         
         return "Unknown"
+    
+    async def detect_lender_from_content(self, content: bytes, filename: str) -> dict:
+        """
+        Use LLM to detect lender name and program from PDF content.
+        Returns: {"lender": str, "program": str | None, "confidence": str}
+        """
+        try:
+            # Extract text from PDF
+            text, _ = self._extract_pdf_content(content)
+            
+            # Take first ~3000 chars for analysis (usually contains header/title)
+            sample_text = text[:3000]
+            
+            # Use OpenAI to detect lender
+            client = AsyncOpenAI(api_key=settings.openai_api_key)
+            
+            known_lenders_str = ", ".join(KNOWN_LENDERS)
+            
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Use cheaper model for this task
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"""You are an expert at identifying mortgage lender names from documents.
+
+Known lenders in our system: {known_lenders_str}
+
+Analyze the document text and identify:
+1. The lender/company name (who issued this document)
+2. The specific program name (if mentioned)
+
+Return JSON only:
+{{"lender": "Exact Lender Name", "program": "Program Name or null", "confidence": "high|medium|low"}}
+
+Rules:
+- Match to known lenders when possible (exact spelling)
+- If unsure, use the company name from the document header/footer
+- If no lender found, return {{"lender": null, "program": null, "confidence": "low"}}"""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Filename: {filename}\n\nDocument text:\n{sample_text}"
+                    }
+                ],
+                temperature=0,
+                max_tokens=200
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
+            if result_text.startswith("```"):
+                result_text = result_text.split("```")[1]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:]
+            
+            result = json.loads(result_text)
+            
+            return {
+                "lender": result.get("lender"),
+                "program": result.get("program"),
+                "confidence": result.get("confidence", "medium")
+            }
+            
+        except Exception as e:
+            print(f"Error detecting lender: {e}")
+            # Fallback to filename extraction
+            lender = self._extract_lender_name("", filename)
+            return {
+                "lender": lender if lender != "Unknown" else None,
+                "program": None,
+                "confidence": "low"
+            }
