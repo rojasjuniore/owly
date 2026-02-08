@@ -42,7 +42,7 @@ class RetrievalService:
                         1 - (c.embedding <=> cast(:embedding as vector)) as similarity
                     FROM chunks c
                     JOIN documents d ON c.document_id = d.id
-                    WHERE d.status = 'active'
+                    WHERE d.status::text = 'active'
                     ORDER BY c.embedding <=> cast(:embedding as vector)
                     LIMIT :limit
                 """).bindparams(

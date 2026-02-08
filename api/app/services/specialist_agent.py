@@ -141,7 +141,7 @@ Which products is this borrower eligible for?"""
                         SELECT c.content, c.section_path, d.filename
                         FROM chunks c
                         JOIN documents d ON c.document_id = d.id
-                        WHERE d.lender = :lender AND d.status = 'active'::documentstatus
+                        WHERE d.lender = :lender AND d.status::text = 'active'
                         LIMIT 10
                     """).bindparams(bindparam("lender", value=self.lender_name))
                     result = await session.execute(sql)
