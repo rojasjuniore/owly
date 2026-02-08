@@ -57,9 +57,19 @@ class LeaderAgent(BaseAgent):
         """
         Analyze scenario and return top candidate lenders with citations.
         """
-        # Get some context from RAG to help decision
-        query = self._build_query(scenario)
-        chunks = await self.retrieval.search(query, top_k=10)
+        try:
+            # Get some context from RAG to help decision
+            query = self._build_query(scenario)
+            chunks = await self.retrieval.search(query, top_k=10)
+        except Exception as e:
+            # If retrieval fails, return fallback with all lenders
+            return {
+                "understanding": "Could not search documents",
+                "top_candidates": [{"lender": l, "reason": "Included for analysis"} for l in self.available_lenders[:5]],
+                "reasoning": f"Fallback due to retrieval error: {str(e)}",
+                "sources": [],
+                "error": str(e)
+            }
         
         # Build context about what lenders appear in results - with source IDs for citations
         lender_mentions = {}
@@ -95,6 +105,10 @@ Which lenders should we analyze in detail for this scenario?
 Return the top 3-5 most promising candidates with citations."""
 
         result = await self._call_llm(user_prompt)
+        
+        # Ensure result is a dict
+        if not isinstance(result, dict):
+            result = {"error": "Invalid LLM response", "raw": str(result)}
         
         # Add sources to result
         result["sources"] = sources
