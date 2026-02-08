@@ -132,7 +132,7 @@ Which products is this borrower eligible for?"""
             
             # If no specific chunks, try getting any chunks for this lender
             if not lender_chunks:
-                from sqlalchemy import text
+                from sqlalchemy import text, bindparam
                 from app.db import async_session
                 
                 # Use separate session to avoid transaction conflicts
@@ -141,10 +141,10 @@ Which products is this borrower eligible for?"""
                         SELECT c.content, c.section_path, d.filename
                         FROM chunks c
                         JOIN documents d ON c.document_id = d.id
-                        WHERE d.lender = :lender AND d.status = 'active'
+                        WHERE d.lender = :lender AND d.status = 'active'::documentstatus
                         LIMIT 10
-                    """)
-                    result = await session.execute(sql, {"lender": self.lender_name})
+                    """).bindparams(bindparam("lender", value=self.lender_name))
+                    result = await session.execute(sql)
                     rows = result.fetchall()
                     lender_chunks = [
                         {"content": r.content, "section_path": r.section_path, "filename": r.filename}

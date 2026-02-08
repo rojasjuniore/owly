@@ -22,10 +22,15 @@ class RetrievalService:
             # Generate embedding for query
             embedding = await self._embed(query)
             
+            # Format embedding as PostgreSQL vector literal
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+            
             # Use separate session for vector search to avoid transaction conflicts
             async with async_session() as session:
-                # Vector similarity search
-                # Using pgvector's cosine distance
+                # Vector similarity search using pgvector
+                # Use bindparam for proper parameter handling with asyncpg
+                from sqlalchemy import bindparam
+                
                 sql = text("""
                     SELECT 
                         c.id,
@@ -34,18 +39,18 @@ class RetrievalService:
                         c.document_id,
                         d.filename,
                         d.lender,
-                        1 - (c.embedding <=> :embedding::vector) as similarity
+                        1 - (c.embedding <=> cast(:embedding as vector)) as similarity
                     FROM chunks c
                     JOIN documents d ON c.document_id = d.id
                     WHERE d.status = 'active'
-                    ORDER BY c.embedding <=> :embedding::vector
+                    ORDER BY c.embedding <=> cast(:embedding as vector)
                     LIMIT :limit
-                """)
-                
-                result = await session.execute(
-                    sql,
-                    {"embedding": str(embedding), "limit": top_k}
+                """).bindparams(
+                    bindparam("embedding", value=embedding_str),
+                    bindparam("limit", value=top_k)
                 )
+                
+                result = await session.execute(sql)
                 rows = result.fetchall()
                 
                 return [

@@ -51,13 +51,28 @@ async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
             conversation_id=request.conversation_id
         )
         
+        # Ensure facts is always a dict
+        facts = result.get("facts", {})
+        if not isinstance(facts, dict):
+            facts = {}
+        
+        # Ensure missing_fields is always a list
+        missing_fields = result.get("missing_fields", [])
+        if not isinstance(missing_fields, list):
+            missing_fields = []
+        
+        # Ensure citations is a list of dicts
+        citations = result.get("citations", [])
+        if not isinstance(citations, list):
+            citations = []
+        
         return ChatResponse(
-            message=result["response"],
-            conversation_id=str(result["conversation_id"]),
-            facts=result["facts"],
-            missing_fields=result["missing_fields"],
-            confidence=result.get("confidence"),
-            citations=result.get("citations")
+            message=result.get("response", "I couldn't process your request."),
+            conversation_id=str(result.get("conversation_id", "")),
+            facts=facts,
+            missing_fields=missing_fields,
+            confidence=result.get("confidence", 0),
+            citations=citations
         )
     except Exception as e:
         # Log the error and return a helpful message
@@ -67,8 +82,8 @@ async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
         
         # Return a fallback response instead of 500
         return ChatResponse(
-            message=f"Sorry, I encountered an error processing your request. Please try again or rephrase your question.",
-            conversation_id="",
+            message="Sorry, I encountered an error processing your request. Please try again or rephrase your question.",
+            conversation_id=str(request.conversation_id) if request.conversation_id else "",
             facts={},
             missing_fields=[],
             confidence=0,
