@@ -44,20 +44,36 @@ async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
     4. If complete: run eligibility check
     5. If incomplete: ask follow-up
     """
-    chat_service = ChatService(db)
-    result = await chat_service.process_message(
-        message=request.message,
-        conversation_id=request.conversation_id
-    )
-    
-    return ChatResponse(
-        message=result["response"],
-        conversation_id=str(result["conversation_id"]),
-        facts=result["facts"],
-        missing_fields=result["missing_fields"],
-        confidence=result.get("confidence"),
-        citations=result.get("citations")
-    )
+    try:
+        chat_service = ChatService(db)
+        result = await chat_service.process_message(
+            message=request.message,
+            conversation_id=request.conversation_id
+        )
+        
+        return ChatResponse(
+            message=result["response"],
+            conversation_id=str(result["conversation_id"]),
+            facts=result["facts"],
+            missing_fields=result["missing_fields"],
+            confidence=result.get("confidence"),
+            citations=result.get("citations")
+        )
+    except Exception as e:
+        # Log the error and return a helpful message
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"Chat error: {error_detail}")
+        
+        # Return a fallback response instead of 500
+        return ChatResponse(
+            message=f"Sorry, I encountered an error processing your request. Please try again or rephrase your question.",
+            conversation_id="",
+            facts={},
+            missing_fields=[],
+            confidence=0,
+            citations=[]
+        )
 
 
 @router.get("/conversations", response_model=list[ConversationResponse])
