@@ -26,9 +26,22 @@ async def get_db():
     async with async_session() as session:
         try:
             yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
+            # Only commit if there were no errors
+            if session.is_active:
+                await session.commit()
+        except Exception as e:
+            # Always rollback on any error
+            if session.is_active:
+                await session.rollback()
             raise
+        finally:
+            await session.close()
+
+
+async def get_readonly_session():
+    """Get a readonly session for isolated queries."""
+    async with async_session() as session:
+        try:
+            yield session
         finally:
             await session.close()

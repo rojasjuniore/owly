@@ -3,6 +3,7 @@ from sqlalchemy import select, and_, or_
 from decimal import Decimal
 
 from app.models.document import Rule, DocumentStatus
+from app.db import async_session
 
 
 class RulesService:
@@ -14,83 +15,88 @@ class RulesService:
         Match scenario facts against structured rules.
         Returns list of matching rules sorted by relevance.
         """
-        query = select(Rule).where(Rule.status == DocumentStatus.ACTIVE)
-        
-        # Build filters based on available facts
-        filters = []
-        
-        # FICO filter
-        if facts.get("fico"):
-            try:
-                fico = int(facts["fico"])
-                filters.append(
-                    or_(
-                        Rule.fico_min.is_(None),
-                        Rule.fico_min <= fico
+        try:
+            query = select(Rule).where(Rule.status == DocumentStatus.ACTIVE)
+            
+            # Build filters based on available facts
+            filters = []
+            
+            # FICO filter
+            if facts.get("fico"):
+                try:
+                    fico = int(facts["fico"])
+                    filters.append(
+                        or_(
+                            Rule.fico_min.is_(None),
+                            Rule.fico_min <= fico
+                        )
                     )
-                )
-                filters.append(
-                    or_(
-                        Rule.fico_max.is_(None),
-                        Rule.fico_max >= fico
+                    filters.append(
+                        or_(
+                            Rule.fico_max.is_(None),
+                            Rule.fico_max >= fico
+                        )
                     )
-                )
-            except (ValueError, TypeError):
-                pass
-        
-        # LTV filter
-        if facts.get("ltv"):
-            try:
-                ltv = Decimal(str(facts["ltv"]))
-                filters.append(
-                    or_(
-                        Rule.ltv_max.is_(None),
-                        Rule.ltv_max >= ltv
+                except (ValueError, TypeError):
+                    pass
+            
+            # LTV filter
+            if facts.get("ltv"):
+                try:
+                    ltv = Decimal(str(facts["ltv"]))
+                    filters.append(
+                        or_(
+                            Rule.ltv_max.is_(None),
+                            Rule.ltv_max >= ltv
+                        )
                     )
-                )
-            except (ValueError, TypeError):
-                pass
-        
-        # Loan amount filter
-        if facts.get("loan_amount"):
-            try:
-                # Parse loan amount (handle formats like "$500,000" or "500000")
-                amount_str = str(facts["loan_amount"]).replace("$", "").replace(",", "")
-                amount = Decimal(amount_str)
-                filters.append(
-                    or_(
-                        Rule.loan_min.is_(None),
-                        Rule.loan_min <= amount
+                except (ValueError, TypeError):
+                    pass
+            
+            # Loan amount filter
+            if facts.get("loan_amount"):
+                try:
+                    # Parse loan amount (handle formats like "$500,000" or "500000")
+                    amount_str = str(facts["loan_amount"]).replace("$", "").replace(",", "")
+                    amount = Decimal(amount_str)
+                    filters.append(
+                        or_(
+                            Rule.loan_min.is_(None),
+                            Rule.loan_min <= amount
+                        )
                     )
-                )
-                filters.append(
-                    or_(
-                        Rule.loan_max.is_(None),
-                        Rule.loan_max >= amount
+                    filters.append(
+                        or_(
+                            Rule.loan_max.is_(None),
+                            Rule.loan_max >= amount
+                        )
                     )
-                )
-            except (ValueError, TypeError):
-                pass
-        
-        # Apply filters
-        if filters:
-            query = query.where(and_(*filters))
-        
-        # Execute query
-        result = await self.db.execute(query)
-        rules = result.scalars().all()
-        
-        # Post-filter and score rules
-        scored_rules = []
-        for rule in rules:
-            score = self._score_rule(rule, facts)
-            if score > 0:
-                scored_rules.append((score, rule))
-        
-        # Sort by score descending
-        scored_rules.sort(key=lambda x: x[0], reverse=True)
-        
-        return [rule for _, rule in scored_rules]
+                except (ValueError, TypeError):
+                    pass
+            
+            # Apply filters
+            if filters:
+                query = query.where(and_(*filters))
+            
+            # Use separate session to avoid transaction conflicts
+            async with async_session() as session:
+                result = await session.execute(query)
+                rules = result.scalars().all()
+            
+            # Post-filter and score rules
+            scored_rules = []
+            for rule in rules:
+                score = self._score_rule(rule, facts)
+                if score > 0:
+                    scored_rules.append((score, rule))
+            
+            # Sort by score descending
+            scored_rules.sort(key=lambda x: x[0], reverse=True)
+            
+            return [rule for _, rule in scored_rules]
+        except Exception as e:
+            print(f"RulesService.match error: {e}")
+            return []
     
     def _score_rule(self, rule: Rule, facts: dict) -> int:
         """
@@ -148,9 +154,15 @@ class RulesService:
     
     async def get_by_lender(self, lender: str) -> list[Rule]:
         """Get all active rules for a specific lender."""
-        result = await self.db.execute(
-            select(Rule)
-            .where(Rule.lender == lender)
-            .where(Rule.status == DocumentStatus.ACTIVE)
-        )
-        return result.scalars().all()
+        try:
+            # Use separate session to avoid transaction conflicts
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Rule)
+                    .where(Rule.lender == lender)
+                    .where(Rule.status == DocumentStatus.ACTIVE)
+                )
+                return result.scalars().all()
+        except Exception as e:
+            print(f"RulesService.get_by_lender error for {lender}: {e}")
+            return []

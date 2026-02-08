@@ -117,37 +117,44 @@ Which products is this borrower eligible for?"""
     
     async def _get_lender_chunks(self, scenario: dict) -> list[dict]:
         """Get chunks specific to this lender."""
-        # Build query
-        query = self._build_query(scenario)
-        
-        # Search with lender filter (simplified - full version would filter at query level)
-        all_chunks = await self.retrieval.search(query, top_k=20)
-        
-        # Filter to this lender
-        lender_chunks = [
-            c for c in all_chunks
-            if c.get("lender", "").lower() == self.lender_name.lower()
-        ]
-        
-        # If no specific chunks, try getting any chunks for this lender
-        if not lender_chunks:
-            from sqlalchemy import text
+        try:
+            # Build query
+            query = self._build_query(scenario)
             
-            sql = text("""
-                SELECT c.content, c.section_path, d.filename
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE d.lender = :lender AND d.status = 'active'
-                LIMIT 10
-            """)
-            result = await self.db.execute(sql, {"lender": self.lender_name})
-            rows = result.fetchall()
+            # Search with lender filter (simplified - full version would filter at query level)
+            all_chunks = await self.retrieval.search(query, top_k=20)
+            
+            # Filter to this lender
             lender_chunks = [
-                {"content": r.content, "section_path": r.section_path, "filename": r.filename}
-                for r in rows
+                c for c in all_chunks
+                if c.get("lender", "").lower() == self.lender_name.lower()
             ]
-        
-        return lender_chunks[:10]
+            
+            # If no specific chunks, try getting any chunks for this lender
+            if not lender_chunks:
+                from sqlalchemy import text
+                from app.db import async_session
+                
+                # Use separate session to avoid transaction conflicts
+                async with async_session() as session:
+                    sql = text("""
+                        SELECT c.content, c.section_path, d.filename
+                        FROM chunks c
+                        JOIN documents d ON c.document_id = d.id
+                        WHERE d.lender = :lender AND d.status = 'active'
+                        LIMIT 10
+                    """)
+                    result = await session.execute(sql, {"lender": self.lender_name})
+                    rows = result.fetchall()
+                    lender_chunks = [
+                        {"content": r.content, "section_path": r.section_path, "filename": r.filename}
+                        for r in rows
+                    ]
+            
+            return lender_chunks[:10]
+        except Exception as e:
+            print(f"SpecialistAgent._get_lender_chunks error for {self.lender_name}: {e}")
+            return []
     
     def _build_query(self, scenario: dict) -> str:
         """Build search query from scenario."""
