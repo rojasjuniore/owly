@@ -266,6 +266,13 @@ What would you like to know?"""
     async def _generate_preliminary_response(self, facts: dict, missing: list[str]) -> dict:
         """Generate preliminary suggestions with incomplete data."""
         
+        # Check if we have any lenders in the system
+        available_lenders = await self.agent_factory.get_available_lenders()
+        
+        if not available_lenders:
+            # No lenders in system - give general guidance
+            return self._format_no_lenders_response(facts, missing)
+        
         # Run a simplified analysis
         try:
             leader = await self.agent_factory.create_leader_agent()
@@ -304,11 +311,57 @@ What would you like to know?"""
             }
             
         except Exception as e:
+            # Fallback response on error
+            missing_text = ""
+            if missing:
+                missing_text = f"To give better recommendations, could you tell me:\n- {FIELD_DESCRIPTIONS.get(missing[0], 'more details')}"
             return {
-                "response": f"I'm analyzing your scenario. To give better recommendations, could you tell me:\n"
-                          f"- {FIELD_DESCRIPTIONS.get(missing[0], 'more details')}" if missing else "",
+                "response": f"I'm analyzing your scenario. {missing_text}",
                 "citations": []
             }
+    
+    def _format_no_lenders_response(self, facts: dict, missing: list[str]) -> dict:
+        """Format response when no lenders are loaded in the system."""
+        response_parts = ["## Scenario Analysis\n"]
+        
+        # Show what we understood
+        response_parts.append("**Your Scenario:**")
+        for key, value in facts.items():
+            if value:
+                label = FIELD_DESCRIPTIONS.get(key, key.replace("_", " ")).title()
+                response_parts.append(f"- {label}: {value}")
+        
+        # General guidance based on facts
+        fico = facts.get("fico")
+        if fico:
+            response_parts.append(f"\n**General Guidance for FICO {fico}:**")
+            if fico >= 740:
+                response_parts.append("- Excellent credit! You should qualify for the best rates and terms.")
+                response_parts.append("- Conventional, FHA, VA, and most Non-QM products should be available.")
+            elif fico >= 680:
+                response_parts.append("- Good credit. Most conventional and government programs available.")
+                response_parts.append("- Some rate adjustments may apply for Non-QM products.")
+            elif fico >= 620:
+                response_parts.append("- FHA is likely your best option (minimum 580 with 3.5% down).")
+                response_parts.append("- Some conventional lenders may work, but expect higher rates.")
+                response_parts.append("- Non-QM options available but with stricter terms.")
+            else:
+                response_parts.append("- Limited options. FHA may work with 10% down (500-579 score).")
+                response_parts.append("- Consider credit repair before applying.")
+        
+        # What's missing
+        if missing:
+            response_parts.append("\n**To provide specific lender recommendations, I need:**")
+            for field in missing[:4]:
+                desc = FIELD_DESCRIPTIONS.get(field, field.replace("_", " "))
+                response_parts.append(f"- {desc}")
+        
+        response_parts.append("\n*Note: No lender guidelines are loaded yet. Once they are, I can give specific recommendations.*")
+        
+        return {
+            "response": "\n".join(response_parts),
+            "citations": []
+        }
     
     async def _run_multi_agent_analysis(self, scenario: dict) -> dict:
         """
