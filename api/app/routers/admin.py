@@ -218,6 +218,8 @@ async def update_document(
 @router.delete("/documents/{document_id}")
 async def delete_document(document_id: UUID, db: AsyncSession = Depends(get_db)):
     """Delete a document and its chunks/rules."""
+    from sqlalchemy import delete as sql_delete
+    
     result = await db.execute(
         select(Document).where(Document.id == document_id)
     )
@@ -226,8 +228,20 @@ async def delete_document(document_id: UUID, db: AsyncSession = Depends(get_db))
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     
+    # Delete related chunks first
+    await db.execute(
+        sql_delete(Chunk).where(Chunk.document_id == document_id)
+    )
+    
+    # Delete related rules
+    await db.execute(
+        sql_delete(Rule).where(Rule.document_id == document_id)
+    )
+    
+    # Now delete the document
     await db.delete(doc)
-    return {"status": "deleted"}
+    
+    return {"status": "deleted", "document_id": str(document_id)}
 
 
 # --- Rules ---
