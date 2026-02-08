@@ -84,8 +84,8 @@ Respond naturally and helpfully."""
         
         for i, rule in enumerate(rules[:10]):
             context_parts.append(f"[{i+1}] {rule.lender} - {rule.program or 'Standard'}: "
-                               f"FICO {rule.fico_min}-{rule.fico_max}, "
-                               f"LTV max {rule.ltv_max}%, "
+                               f"FICO {rule.fico_min or 'N/A'}-{rule.fico_max or 'N/A'}, "
+                               f"LTV max {rule.ltv_max or 'N/A'}%, "
                                f"Doc types: {', '.join(rule.doc_types or ['Full Doc'])}")
             citations.append({
                 "id": i+1,
@@ -96,14 +96,39 @@ Respond naturally and helpfully."""
         
         for i, chunk in enumerate(chunks):
             idx = len(rules) + i + 1
-            context_parts.append(f"[{idx}] From {chunk.document.lender} ({chunk.document.filename}): "
+            # Safely access document attributes
+            lender = getattr(chunk.document, 'lender', 'Unknown') if chunk.document else 'Unknown'
+            filename = getattr(chunk.document, 'filename', 'Unknown') if chunk.document else 'Unknown'
+            context_parts.append(f"[{idx}] From {lender} ({filename}): "
                                f"{chunk.content[:300]}...")
             citations.append({
                 "id": idx,
-                "lender": chunk.document.lender,
-                "filename": chunk.document.filename,
+                "lender": lender,
+                "filename": filename,
                 "type": "document"
             })
+        
+        # Handle case when no data is available
+        if not context_parts:
+            return {
+                "response": f"""I don't have specific lender information loaded yet to answer your question about {product_type or 'this product type'}.
+
+Once lender guidelines are uploaded, I'll be able to tell you:
+- Which lenders offer the product
+- Minimum FICO requirements
+- LTV limits
+- Documentation requirements
+
+In general, for **bank statement loans**, look for Non-QM lenders who specialize in self-employed borrowers. Common requirements include:
+- 12-24 months of bank statements
+- FICO typically 620-660+
+- LTV usually 80-85% max
+- 2+ years self-employment history
+
+Would you like to describe your specific scenario? I can help identify what to look for.""",
+                "type": "product_search",
+                "citations": []
+            }
         
         system_prompt = """You are Owly, a mortgage lending assistant. Answer the user's question about specific products or lenders.
 
@@ -154,24 +179,47 @@ Angel Oak requires minimum 660 FICO with 12-24 months statements [1], while Deep
         citations = []
         
         for i, chunk in enumerate(chunks):
-            context_parts.append(f"[{i+1}] {chunk.document.lender} ({chunk.document.filename}): {chunk.content[:400]}")
+            # Safely access document attributes
+            lender = getattr(chunk.document, 'lender', 'Unknown') if chunk.document else 'Unknown'
+            filename = getattr(chunk.document, 'filename', 'Unknown') if chunk.document else 'Unknown'
+            context_parts.append(f"[{i+1}] {lender} ({filename}): {chunk.content[:400]}")
             citations.append({
                 "id": i+1,
-                "lender": chunk.document.lender,
-                "filename": chunk.document.filename,
+                "lender": lender,
+                "filename": filename,
                 "type": "document"
             })
         
         for i, rule in enumerate(rules[:5]):
             idx = len(chunks) + i + 1
-            context_parts.append(f"[{idx}] {rule.lender} - {rule.program}: "
-                               f"FICO {rule.fico_min}-{rule.fico_max}, LTV max {rule.ltv_max}%")
+            context_parts.append(f"[{idx}] {rule.lender} - {rule.program or 'Standard'}: "
+                               f"FICO {rule.fico_min or 'N/A'}-{rule.fico_max or 'N/A'}, LTV max {rule.ltv_max or 'N/A'}%")
             citations.append({
                 "id": idx,
                 "lender": rule.lender,
                 "program": rule.program,
                 "type": "rule"
             })
+        
+        # Handle case when no data is available
+        if not context_parts:
+            return {
+                "response": f"""I don't have specific lender guidelines loaded yet to give you a definitive answer.
+
+However, I can share general industry knowledge:
+
+**For DSCR loans with 5+ units:**
+- Many DSCR lenders DO allow 5+ units, but terms vary
+- Typical requirements: DSCR 1.0-1.25+, LTV 65-75%, FICO 660+
+- Some lenders cap at 4 units, others go up to 10+
+- Larger properties often require lower LTV
+
+Once I have specific lender guidelines loaded, I'll be able to tell you exactly which lenders allow this and their specific requirements.
+
+Would you like to tell me more about your scenario? (FICO, LTV, property location, etc.)""",
+                "type": "eligibility_check",
+                "citations": []
+            }
         
         system_prompt = """You are Owly, a mortgage lending assistant. Answer the user's eligibility question.
 
