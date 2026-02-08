@@ -4,7 +4,6 @@ import fitz  # PyMuPDF
 import io
 import re
 import json
-from openai import AsyncOpenAI
 
 from app.models.document import Document, Chunk, Rule, DocumentStatus
 from app.services.retrieval_service import RetrievalService
@@ -236,73 +235,118 @@ class IngestionService:
     
     async def detect_lender_from_content(self, content: bytes, filename: str) -> dict:
         """
-        Use LLM to detect lender name and program from PDF content.
+        Detect lender name primarily from filename, with content as fallback.
         Returns: {"lender": str, "program": str | None, "confidence": str}
         """
+        # First try: Extract from filename (most reliable)
+        lender, program = self._extract_lender_from_filename(filename)
+        
+        if lender:
+            return {
+                "lender": lender,
+                "program": program,
+                "confidence": "high"
+            }
+        
+        # Second try: Search in PDF content for known lenders
         try:
-            # Extract text from PDF
             text, _ = self._extract_pdf_content(content)
+            lender, program = self._find_lender_in_text(text[:5000])
             
-            # Take first ~3000 chars for analysis (usually contains header/title)
-            sample_text = text[:3000]
-            
-            # Use OpenAI to detect lender
-            client = AsyncOpenAI(api_key=settings.openai_api_key)
-            
-            known_lenders_str = ", ".join(KNOWN_LENDERS)
-            
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",  # Use cheaper model for this task
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"""You are an expert at identifying mortgage lender names from documents.
-
-Known lenders in our system: {known_lenders_str}
-
-Analyze the document text and identify:
-1. The lender/company name (who issued this document)
-2. The specific program name (if mentioned)
-
-Return JSON only:
-{{"lender": "Exact Lender Name", "program": "Program Name or null", "confidence": "high|medium|low"}}
-
-Rules:
-- Match to known lenders when possible (exact spelling)
-- If unsure, use the company name from the document header/footer
-- If no lender found, return {{"lender": null, "program": null, "confidence": "low"}}"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Filename: {filename}\n\nDocument text:\n{sample_text}"
-                    }
-                ],
-                temperature=0,
-                max_tokens=200
-            )
-            
-            result_text = response.choices[0].message.content.strip()
-            
-            # Parse JSON response
-            if result_text.startswith("```"):
-                result_text = result_text.split("```")[1]
-                if result_text.startswith("json"):
-                    result_text = result_text[4:]
-            
-            result = json.loads(result_text)
-            
-            return {
-                "lender": result.get("lender"),
-                "program": result.get("program"),
-                "confidence": result.get("confidence", "medium")
-            }
-            
+            if lender:
+                return {
+                    "lender": lender,
+                    "program": program,
+                    "confidence": "medium"
+                }
         except Exception as e:
-            print(f"Error detecting lender: {e}")
-            # Fallback to filename extraction
-            lender = self._extract_lender_name("", filename)
-            return {
-                "lender": lender if lender != "Unknown" else None,
-                "program": None,
-                "confidence": "low"
-            }
+            print(f"Error extracting PDF content: {e}")
+        
+        return {
+            "lender": None,
+            "program": None,
+            "confidence": "low"
+        }
+    
+    def _extract_lender_from_filename(self, filename: str) -> tuple[str | None, str | None]:
+        """
+        Extract lender name from filename.
+        Common patterns:
+        - "Acra Lending - Bank Statement Program.pdf"
+        - "A&D_Mortgage_Guidelines.pdf"
+        - "AngelOak_DSCR_Matrix.pdf"
+        """
+        # Clean filename
+        name = filename.replace(".pdf", "").replace(".PDF", "")
+        name = name.replace("_", " ").replace("-", " ")
+        
+        # Check against known lenders (case-insensitive)
+        name_lower = name.lower()
+        
+        for known in KNOWN_LENDERS:
+            known_lower = known.lower()
+            # Check if known lender appears in filename
+            if known_lower in name_lower:
+                # Try to extract program name (everything after lender name)
+                parts = name_lower.split(known_lower)
+                program = None
+                if len(parts) > 1 and parts[1].strip():
+                    program_part = parts[1].strip()
+                    # Clean up program name
+                    program_words = program_part.split()
+                    # Filter out common non-program words
+                    skip_words = {"matrix", "guidelines", "guide", "eligibility", "product", "sheet"}
+                    program_words = [w for w in program_words if w not in skip_words]
+                    if program_words:
+                        program = " ".join(program_words).title()
+                
+                return known, program
+        
+        # Try common variations
+        variations = {
+            "a&d": "A&D Mortgage",
+            "ad mortgage": "A&D Mortgage", 
+            "acra": "Acra Lending",
+            "angel oak": "Angel Oak",
+            "angeloak": "Angel Oak",
+            "athas": "Athas Capital",
+            "caliber": "Caliber Home Loans",
+            "carrington": "Carrington",
+            "champions": "Champions Funding",
+            "citadel": "Citadel Servicing",
+            "civic": "Civic Financial",
+            "crosscountry": "CrossCountry Mortgage",
+            "deephaven": "Deephaven",
+            "foa": "Finance of America",
+            "fnba": "First National Bank of America",
+            "freedom": "Freedom Mortgage",
+            "homexpress": "HomeXpress",
+            "impac": "Impac Mortgage",
+            "kind": "Kind Lending",
+            "loanstream": "LoanStream",
+            "naf": "New American Funding",
+            "newrez": "Newrez",
+            "pennymac": "PennyMac",
+            "prmg": "PRMG",
+            "quontic": "Quontic Bank",
+            "rocket": "Rocket Mortgage",
+            "sprout": "Sprout Mortgage",
+            "uwm": "UWM",
+            "verus": "Verus Mortgage",
+        }
+        
+        for pattern, lender in variations.items():
+            if pattern in name_lower:
+                return lender, None
+        
+        return None, None
+    
+    def _find_lender_in_text(self, text: str) -> tuple[str | None, str | None]:
+        """Search for known lenders in document text."""
+        text_lower = text.lower()
+        
+        for known in KNOWN_LENDERS:
+            if known.lower() in text_lower:
+                return known, None
+        
+        return None, None
