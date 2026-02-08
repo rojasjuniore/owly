@@ -41,7 +41,7 @@ class Message(Base):
     conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
     role = Column(Enum(MessageRole), nullable=False)
     content = Column(Text, nullable=False)
-    metadata = Column(JSONB, default=dict)  # citations, retrieved_chunks, etc.
+    extra_data = Column(JSONB, default=dict)  # citations, retrieved_chunks, etc.
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     conversation = relationship("Conversation", back_populates="messages")
