@@ -394,8 +394,18 @@ What would you like to know?"""
             leader = await self.agent_factory.create_leader_agent()
             leader_result = await leader.analyze(scenario)
             
-            top_lenders = leader_result.get("top_candidates", [])
+            top_candidates = leader_result.get("top_candidates", [])
             all_citations = leader_result.get("sources", [])
+            
+            # Extract lender names from candidates (can be dicts or strings)
+            top_lenders = []
+            for candidate in top_candidates:
+                if isinstance(candidate, dict):
+                    lender_name = candidate.get("lender")
+                    if lender_name:
+                        top_lenders.append(lender_name)
+                elif isinstance(candidate, str):
+                    top_lenders.append(candidate)
             
             if not top_lenders:
                 missing = self._get_missing_fields(scenario)
