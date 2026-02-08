@@ -121,18 +121,27 @@ class ChatService:
             
         else:
             # SCENARIO_INPUT or FOLLOW_UP - Extract facts and give recommendations
-            extracted = await self.llm.extract_facts(
-                message, 
-                current_facts,
-                last_question_field=last_question_field
-            )
+            try:
+                extracted = await self.llm.extract_facts(
+                    message, 
+                    current_facts,
+                    last_question_field=last_question_field
+                )
+            except Exception as e:
+                extracted = {}
+            
             # Also merge entities from intent classification
             updated_facts = {**current_facts, **extracted, **self._clean_entities(entities)}
             
             # Generate response based on completeness
-            result = await self._generate_scenario_response(updated_facts)
-            response = result["response"]
-            citations = result.get("citations", [])
+            try:
+                result = await self._generate_scenario_response(updated_facts)
+                response = result["response"]
+                citations = result.get("citations", [])
+            except Exception as e:
+                # Fallback on any error
+                response = f"I understood your scenario. {self._format_facts_summary(updated_facts)}"
+                citations = []
         
         # 6. Update conversation
         conversation.facts = updated_facts
@@ -191,6 +200,19 @@ class ChatService:
     def _clean_entities(self, entities: dict) -> dict:
         """Remove None values from entities."""
         return {k: v for k, v in entities.items() if v is not None}
+    
+    def _format_facts_summary(self, facts: dict) -> str:
+        """Format facts as a simple summary."""
+        if not facts:
+            return "Please tell me about the loan scenario."
+        parts = []
+        for key, value in facts.items():
+            if value:
+                label = FIELD_DESCRIPTIONS.get(key, key.replace("_", " ")).title()
+                parts.append(f"{label}: {value}")
+        if parts:
+            return "Here's what I have: " + ", ".join(parts) + "."
+        return ""
     
     def _get_missing_fields(self, facts: dict) -> list[str]:
         """Return list of fields that are missing."""
