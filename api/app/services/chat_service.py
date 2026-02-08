@@ -118,6 +118,12 @@ class ChatService:
             citations = result.get("citations", [])
             # Merge any extracted entities
             updated_facts = {**current_facts, **self._clean_entities(entities)}
+        
+        elif intent == IntentType.SUMMARY_REQUEST:
+            # User wants a summary of what we know and what's missing
+            updated_facts = current_facts
+            response = self._format_summary_response(current_facts)
+            citations = []
             
         else:
             # SCENARIO_INPUT or FOLLOW_UP - Extract facts and give recommendations
@@ -213,6 +219,39 @@ class ChatService:
         if parts:
             return "Here's what I have: " + ", ".join(parts) + "."
         return ""
+    
+    def _format_summary_response(self, facts: dict) -> str:
+        """Format a detailed summary of client profile and missing information."""
+        response_parts = []
+        
+        # Client Profile section
+        response_parts.append("## 📋 Client Profile\n")
+        if facts:
+            for key, value in facts.items():
+                if value is not None:
+                    label = FIELD_DESCRIPTIONS.get(key, key.replace("_", " ")).title()
+                    response_parts.append(f"- **{label}:** {value}")
+        else:
+            response_parts.append("*No information provided yet.*")
+        
+        # Missing Information section
+        missing = self._get_missing_fields(facts)
+        if missing:
+            response_parts.append("\n\n## ❓ Missing Information\n")
+            for field in missing:
+                label = FIELD_DESCRIPTIONS.get(field, field.replace("_", " ")).title()
+                response_parts.append(f"- {label}")
+        
+        # Confidence
+        confidence = self._calculate_confidence(facts, missing)
+        response_parts.append(f"\n\n**Confidence Level:** {confidence}%")
+        
+        if confidence >= 70:
+            response_parts.append("\n\n*I have enough information to provide recommendations. Just ask!*")
+        else:
+            response_parts.append("\n\n*Please provide more details for better recommendations.*")
+        
+        return "\n".join(response_parts)
     
     def _get_missing_fields(self, facts: dict) -> list[str]:
         """Return list of fields that are missing."""
@@ -321,7 +360,7 @@ What would you like to know?"""
             
             # Add what's missing
             if missing:
-                response_parts.append("\n\n**To improve this recommendation, please provide:**")
+                response_parts.append("\n\n**Missing Information:**")
                 top_missing = missing[:3]
                 for field in top_missing:
                     desc = FIELD_DESCRIPTIONS.get(field, field.replace("_", " "))
@@ -347,7 +386,7 @@ What would you like to know?"""
         response_parts = ["## Scenario Analysis\n"]
         
         # Show what we understood
-        response_parts.append("**Your Scenario:**")
+        response_parts.append("**Client Profile:**")
         for key, value in facts.items():
             if value:
                 label = FIELD_DESCRIPTIONS.get(key, key.replace("_", " ")).title()
@@ -411,13 +450,13 @@ What would you like to know?"""
                 missing = self._get_missing_fields(scenario)
                 missing_text = ""
                 if missing:
-                    missing_text = "\n\n**To find more options, provide:**\n"
+                    missing_text = "\n\n**Missing Information:**\n"
                     for f in missing[:3]:
                         missing_text += f"- {FIELD_DESCRIPTIONS.get(f, f)}\n"
                 
                 return {
                     "response": f"Based on the criteria provided, I couldn't identify strongly matching lenders.\n\n"
-                              f"**Scenario Summary:**\n{self._format_facts(scenario)}"
+                              f"**Client Profile:**\n{self._format_facts(scenario)}"
                               f"{missing_text}",
                     "citations": all_citations
                 }
@@ -498,7 +537,7 @@ What would you like to know?"""
         if analysis:
             # Add scenario summary at the end
             response = analysis
-            response += f"\n\n---\n**Your Scenario:**\n{self._format_facts(scenario)}"
+            response += f"\n\n---\n**Client Profile:**\n{self._format_facts(scenario)}"
             return response
         
         # Fallback formatting
@@ -524,6 +563,6 @@ What would you like to know?"""
                 for prod in result.get("eligible_products", []):
                     response_parts.append(f"- **{lender}**: {prod.get('program', 'Standard')}")
         
-        response_parts.append(f"\n\n---\n**Your Scenario:**\n{self._format_facts(scenario)}")
+        response_parts.append(f"\n\n---\n**Client Profile:**\n{self._format_facts(scenario)}")
         
         return "\n".join(response_parts)

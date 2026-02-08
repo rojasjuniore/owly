@@ -13,6 +13,7 @@ class IntentType:
     SCENARIO_INPUT = "scenario_input"          # Borrower data input
     FOLLOW_UP = "follow_up"                    # Answer to a previous question
     CLARIFICATION = "clarification"            # "What do you mean by LTV?"
+    SUMMARY_REQUEST = "summary_request"        # "Summarize what you know", "What info do you have?"
 
 
 class IntentClassifier:
@@ -61,6 +62,9 @@ Classify the user's message into one of these intents:
 5. **follow_up** - Direct answer to a previous question (short responses)
    Examples: "California", "Yes", "Single family", "80%", "Purchase"
    IMPORTANT: If there was a previous question and the answer is short/direct, this is likely follow_up.
+
+6. **summary_request** - Asking for a summary of current information or what's missing
+   Examples: "Summarize what you know", "What info do you have?", "What am I missing?", "Show me the client profile", "What information have I provided?"
 
 Also extract any mortgage-related entities found in the message.
 {context}
