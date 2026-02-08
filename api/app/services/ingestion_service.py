@@ -15,6 +15,10 @@ from app.config import settings
 KNOWN_LENDERS = [
     "Acra Lending",
     "A&D Mortgage", 
+    "Activator",
+    "AHL",
+    "All Star Credit",
+    "AmWest",
     "Angel Oak",
     "Athas Capital",
     "Caliber Home Loans",
@@ -249,25 +253,28 @@ class IngestionService:
                 messages=[
                     {
                         "role": "system",
-                        "content": f"""You extract mortgage lender and program names from PDF filenames.
+                        "content": f"""You extract mortgage lender/company names and program names from PDF filenames.
 
-Known lenders: {known_lenders_str}
+Known lenders in our system: {known_lenders_str}
 
-Rules:
-1. Match to a known lender when possible (use exact spelling from list)
-2. If the lender isn't in the list but you can identify it, use that name
-3. Extract the program name if mentioned (e.g., "Bank Statement", "DSCR", "Non-QM")
-4. Common filename patterns:
-   - "LenderName_ProgramName_Matrix.pdf"
-   - "LenderName - Program Guidelines.pdf"
-   - "LenderName_Eligibility.pdf"
+IMPORTANT RULES:
+1. The FIRST word(s) in the filename is usually the lender/company name
+2. Match to known lenders when possible, using exact spelling from the list
+3. If the lender isn't in the list, STILL extract it - use the company name from the filename
+4. Program names come AFTER the lender (e.g., "Bank Statement", "DSCR", "NonQM", "Full Doc", "Alt Doc")
+5. Ignore generic words like "Matrix", "Guidelines", "Guide", "Eligibility", "Client", "Summary"
 
-Return JSON only: {{"lender": "Lender Name", "program": "Program Name or null"}}
-If you cannot identify the lender, return: {{"lender": null, "program": null}}"""
+Examples:
+- "AHL NonQM Client Guide.pdf" → lender: "AHL", program: "NonQM"
+- "AmWest Bank Statement Advantage.pdf" → lender: "AmWest", program: "Bank Statement"
+- "Acra Lending Platinum Select.pdf" → lender: "Acra Lending", program: "Platinum Select"
+- "A&D Mortgage NonQm Guidelines.pdf" → lender: "A&D Mortgage", program: "NonQM"
+
+Return JSON only: {{"lender": "Lender Name", "program": "Program Name or null"}}"""
                     },
                     {
                         "role": "user", 
-                        "content": f"Filename: {filename}"
+                        "content": f"Extract lender and program from: {filename}"
                     }
                 ],
                 temperature=0,
