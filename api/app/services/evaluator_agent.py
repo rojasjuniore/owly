@@ -164,13 +164,22 @@ Based on these analyses, provide your recommendation for the best lender/product
         # Return all except the first (which is likely the recommendation)
         return alternatives[1:4] if len(alternatives) > 1 else []
     
-    def _extract_sources(self, analyses: list[dict]) -> list[str]:
-        """Extract source citations."""
-        sources = set()
+    def _extract_sources(self, analyses: list[dict]) -> list[dict]:
+        """Extract source citations as dictionaries."""
+        sources = []
+        seen = set()
         
         for analysis in analyses:
+            lender = analysis.get("lender", "Unknown")
             for prod in analysis.get("eligible_products", []):
                 if prod.get("source"):
-                    sources.add(prod["source"])
+                    source_name = prod["source"]
+                    if source_name not in seen:
+                        seen.add(source_name)
+                        sources.append({
+                            "lender": lender,
+                            "filename": source_name,
+                            "content_preview": f"{lender} - {prod.get('program', 'Program')}"
+                        })
         
-        return list(sources)
+        return sources

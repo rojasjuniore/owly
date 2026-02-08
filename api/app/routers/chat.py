@@ -65,6 +65,11 @@ async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
         citations = result.get("citations", [])
         if not isinstance(citations, list):
             citations = []
+        # Convert any string citations to dicts
+        citations = [
+            c if isinstance(c, dict) else {"source": str(c)}
+            for c in citations
+        ]
         
         return ChatResponse(
             message=result.get("response", "I couldn't process your request."),
