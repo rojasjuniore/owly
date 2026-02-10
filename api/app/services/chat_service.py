@@ -97,6 +97,11 @@ class ChatService:
         intent = intent_result.get("intent", IntentType.SCENARIO_INPUT)
         entities = intent_result.get("extracted_entities", {})
         
+        # 5a. Context Carryover: Extract and update last_mentioned_lender
+        lender_from_message = entities.get("lender_asked")
+        if lender_from_message:
+            conversation.last_mentioned_lender = lender_from_message
+        
         # 5. Route based on intent
         if intent == IntentType.GENERAL_QUESTION:
             result = await self.general_qa.answer_general_question(message)
@@ -107,12 +112,22 @@ class ChatService:
             
         elif intent == IntentType.PRODUCT_SEARCH:
             product_type = entities.get("product_type_asked") or entities.get("doc_type")
-            result = await self.general_qa.answer_product_search(message, product_type)
+            # Context Carryover: Use last_mentioned_lender for follow-up questions
+            # Only if no specific lender was mentioned in this message
+            lender_filter = lender_from_message or conversation.last_mentioned_lender
+            result = await self.general_qa.answer_product_search(
+                message, 
+                product_type,
+                lender_filter=lender_filter
+            )
             response = result["response"]
             citations = result.get("citations", [])
             updated_facts = current_facts
             
         elif intent == IntentType.ELIGIBILITY_CHECK:
+            # CRITICAL: DO NOT apply lender filter for eligibility checks!
+            # Eligibility questions like "Conventional requirements?" should search ALL lenders.
+            # This was the bug in commit 36f7034 - filtering caused empty results.
             result = await self.general_qa.answer_eligibility_check(message, entities)
             response = result["response"]
             citations = result.get("citations", [])

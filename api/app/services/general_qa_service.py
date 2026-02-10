@@ -68,15 +68,26 @@ Respond naturally and helpfully."""
             "citations": []
         }
     
-    async def answer_product_search(self, question: str, product_type: str | None = None) -> dict:
+    async def answer_product_search(
+        self, 
+        question: str, 
+        product_type: str | None = None,
+        lender_filter: str | None = None
+    ) -> dict:
         """
         Answer product-specific questions like:
         - Which lender is best for bank statement loans?
         - Who offers DSCR?
+        
+        Args:
+            question: The user's question
+            product_type: Filter by product type (e.g., "bank statement", "DSCR")
+            lender_filter: Optional lender to focus on (for follow-up questions)
         """
         # Get relevant rules and documents
-        rules = await self._get_rules_by_product(product_type)
-        chunks = await self._search_chunks(question, limit=5)
+        # Apply lender filter if provided (for context carryover in follow-ups)
+        rules = await self._get_rules_by_product(product_type, lender_filter=lender_filter)
+        chunks = await self._search_chunks(question, limit=5, lender_filter=lender_filter)
         
         # Format context with citations
         context_parts = []
@@ -285,24 +296,51 @@ and **Deephaven** [3] goes up to 8 units. Note that LTV requirements are typical
             "product_types": ["Conventional", "FHA", "VA", "USDA", "Non-QM (Bank Statement, DSCR, Asset Depletion)"]
         }
     
-    async def _get_rules_by_product(self, product_type: str | None) -> list[Rule]:
-        """Get rules filtered by product type."""
+    async def _get_rules_by_product(
+        self, 
+        product_type: str | None, 
+        lender_filter: str | None = None
+    ) -> list[Rule]:
+        """
+        Get rules filtered by product type and optionally by lender.
+        
+        NOTE: lender_filter is only used for PRODUCT_SEARCH follow-ups,
+        NOT for ELIGIBILITY_CHECK (which always searches all lenders).
+        """
         query = select(Rule)
         if product_type:
             query = query.where(Rule.doc_types.contains([product_type]))
+        if lender_filter:
+            # Case-insensitive lender match
+            query = query.where(Rule.lender.ilike(f"%{lender_filter}%"))
         query = query.limit(20)
         result = await self.db.execute(query)
         return list(result.scalars().all())
     
-    async def _search_chunks(self, query: str, limit: int = 5) -> list[Chunk]:
-        """Search chunks by text (simplified - would use vector search in production)."""
-        # For now, just get recent chunks - in production, use pgvector similarity search
+    async def _search_chunks(
+        self, 
+        query: str, 
+        limit: int = 5,
+        lender_filter: str | None = None
+    ) -> list[Chunk]:
+        """
+        Search chunks by text (simplified - would use vector search in production).
+        
+        NOTE: lender_filter is only used for PRODUCT_SEARCH follow-ups,
+        NOT for ELIGIBILITY_CHECK (which always searches all lenders).
+        """
         from sqlalchemy.orm import selectinload
-        result = await self.db.execute(
-            select(Chunk)
-            .options(selectinload(Chunk.document))
-            .limit(limit)
-        )
+        
+        stmt = select(Chunk).options(selectinload(Chunk.document))
+        
+        if lender_filter:
+            # Filter by lender via join with Document
+            stmt = stmt.join(Chunk.document).where(
+                Document.lender.ilike(f"%{lender_filter}%")
+            )
+        
+        stmt = stmt.limit(limit)
+        result = await self.db.execute(stmt)
         return list(result.scalars().all())
     
     async def _search_rules_by_criteria(self, criteria: dict) -> list[Rule]:

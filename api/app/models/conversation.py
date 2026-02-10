@@ -28,6 +28,9 @@ class Conversation(Base):
     facts = Column(JSONB, default=dict)
     missing_fields = Column(ARRAY(String), default=list)
     confidence_score = Column(String(10))
+    # Context Carryover: remember the last lender mentioned for follow-up questions
+    # IMPORTANT: This is only used for PRODUCT_SEARCH and GENERAL_QUESTION, NOT for ELIGIBILITY_CHECK
+    last_mentioned_lender = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
